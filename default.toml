@@ -1,0 +1,116 @@
+"""Dış API Katmanı.
+
+Standart kütüphanenin ``http.server`` modülüyle çalışan yerel JSON API.
+Hazır çatı (framework) kullanılmaz; yönlendirme bu dosyada tanımlıdır.
+Uçlar OpenAPI 3.0.3 belgesiyle (``openapi.json``) belgelenmiştir.
+
+Sunucu yalnızca kullanıcı başlattığında açılır; ASENA kendiliğinden ağ
+dinlemez (onay ilkesi).
+"""
+
+from __future__ import annotations
+
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from asena.core.cognitive_core import CognitiveCore
+
+
+class AsenaAPI:
+    """İş mantığı taşıyan yönlendirici; HTTP katmanından bağımsız test edilir."""
+
+    def __init__(self, cekirdek: "CognitiveCore") -> None:
+        self.c = cekirdek
+        from asena.chat import ChatMode
+
+        self._sohbet = ChatMode(cekirdek)
+
+    # ------------------------------------------------------------------ uçlar
+    def sohbet(self, metin: str) -> dict[str, Any]:
+        yanit = self.c.dongu.calis(metin)
+        return {
+            "yanit": yanit.metin, "guven": yanit.guven,
+            "niyet": yanit.niyet, "iz": yanit.iz,
+        }
+
+    def kismi(self, kismi_metin: str) -> dict[str, Any]:
+        """Öngörülü düşünme: kısmi girdiyi ön-işleme kuyruğuna alır."""
+        if self.c.predictive is not None:
+            self.c.predictive.on_partial(kismi_metin)
+        return {"durum": "ön-işlem başlatıldı"}
+
+    def egit(self, kaynak: str) -> dict[str, Any]:
+        from asena.training import Trainer
+
+        rapor = Trainer(self.c).egit(kaynak)
+        return {
+            "dosya": rapor.dosya_sayisi, "cumle": rapor.cumle_sayisi,
+            "yeni_kelime": rapor.yeni_kelime, "yeni_iliski": rapor.yeni_iliski,
+            "hatalar": rapor.hatalar,
+        }
+
+    def durum(self) -> dict[str, Any]:
+        from asena import __version__
+
+        return {
+            "surum": __version__,
+            "motor_sayisi": len(self.c.registry),
+            "motorlar": self.c.registry.names(),
+            "bilgi_sayisi": self.c.bilgiler.say(),
+            "yetkiler": self.c.consent.aktif_izinler(),
+        }
+
+    def kapat(self) -> None:
+        self._sohbet.kapat()
+
+
+def _isleyici_sinifi(api: AsenaAPI):
+    class Isleyici(BaseHTTPRequestHandler):
+        def _gonder(self, kod: int, veri: dict[str, Any]) -> None:
+            govde = json.dumps(veri, ensure_ascii=False).encode("utf-8")
+            self.send_response(kod)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(govde)))
+            self.end_headers()
+            self.wfile.write(govde)
+
+        def _govde(self) -> dict[str, Any]:
+            uzunluk = int(self.headers.get("Content-Length", 0))
+            if not uzunluk:
+                return {}
+            try:
+                return json.loads(self.rfile.read(uzunluk).decode("utf-8"))
+            except json.JSONDecodeError:
+                return {}
+
+        def do_GET(self) -> None:  # noqa: N802 — stdlib arayüzü
+            if self.path == "/durum":
+                self._gonder(200, api.durum())
+            else:
+                self._gonder(404, {"hata": "Uç bulunamadı."})
+
+        def do_POST(self) -> None:  # noqa: N802 — stdlib arayüzü
+            veri = self._govde()
+            if self.path == "/sohbet":
+                self._gonder(200, api.sohbet(str(veri.get("metin", ""))))
+            elif self.path == "/kismi":
+                self._gonder(200, api.kismi(str(veri.get("metin", ""))))
+            elif self.path == "/egitim":
+                self._gonder(200, api.egit(str(veri.get("kaynak", ""))))
+            else:
+                self._gonder(404, {"hata": "Uç bulunamadı."})
+
+        def log_message(self, *_: Any) -> None:  # sessiz mod
+            return
+
+    return Isleyici
+
+
+def sunucu_baslat(cekirdek: "CognitiveCore", adres: str = "127.0.0.1",
+                  port: int = 8765) -> ThreadingHTTPServer:
+    """Yerel API sunucusunu başlatır (çağıranın sorumluluğundadır)."""
+    api = AsenaAPI(cekirdek)
+    sunucu = ThreadingHTTPServer((adres, port), _isleyici_sinifi(api))
+    return sunucu

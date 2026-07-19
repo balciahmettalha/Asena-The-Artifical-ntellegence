@@ -1,0 +1,73 @@
+"""Düşünce Ağacı (Tree of Thought).
+
+Tek yol yerine çoklu düşünce dalları üretir, her dalı skorlar ve en iyi
+sonucu seçer. Dallar; kural tabanlı, benzetimsel ve bellek tabanlı
+yaklaşımlar gibi farklı stratejilerdir.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from asena.engine.base import BaseEngine, EngineResult
+
+Dal = Callable[[Any], tuple[str, float]]
+
+
+@dataclass
+class DusunceDali:
+    """Tek bir düşünce dalının sonucu."""
+
+    ad: str
+    sonuc: str
+    skor: float
+    notlar: list[str] = field(default_factory=list)
+
+
+class TreeOfThought(BaseEngine):
+    """Çoklu düşünce dalı üretip seçen motor."""
+
+    name = "tree_of_thought"
+    group = "reason"
+
+    def __init__(self, en_cok_dal: int = 5) -> None:
+        super().__init__()
+        self.en_cok_dal = en_cok_dal
+
+    def dusun(self, problem: Any, dallar: list[tuple[str, Dal]]) -> DusunceDali | None:
+        """Tüm dalları çalıştırır; en yüksek skorluyu döndürür."""
+        sonuclar: list[DusunceDali] = []
+        for ad, uretici in dallar[: self.en_cok_dal]:
+            try:
+                sonuc, skor = uretici(problem)
+            except Exception as exc:  # noqa: BLE001 — dal hatası ağacı durdurmaz
+                sonuclar.append(DusunceDali(ad=ad, sonuc="", skor=0.0,
+                                            notlar=[f"hata: {exc!r}"]))
+                continue
+            sonuclar.append(DusunceDali(ad=ad, sonuc=sonuc, skor=float(skor)))
+        if not sonuclar:
+            return None
+        return max(sonuclar, key=lambda d: d.skor)
+
+    def dallarla_skorla(self, problem: Any,
+                        dallar: list[tuple[str, Dal]]) -> list[DusunceDali]:
+        """Tüm dal sonuçlarını skor sırasıyla döndürür (denetim için)."""
+        sonuclar: list[DusunceDali] = []
+        for ad, uretici in dallar[: self.en_cok_dal]:
+            try:
+                sonuc, skor = uretici(problem)
+                sonuclar.append(DusunceDali(ad=ad, sonuc=sonuc, skor=float(skor)))
+            except Exception:  # noqa: BLE001
+                sonuclar.append(DusunceDali(ad=ad, sonuc="", skor=0.0))
+        return sorted(sonuclar, key=lambda d: -d.skor)
+
+    def process(self, girdi: dict[str, Any], **kwargs: Any) -> EngineResult:
+        dallar = girdi.get("dallar", [])
+        en_iyi = self.dusun(girdi.get("problem"), dallar)
+        if en_iyi is None:
+            return EngineResult.hata("Çalıştırılabilir düşünce dalı yok.")
+        return EngineResult(
+            data=en_iyi, confidence=en_iyi.skor,
+            explanation=f"Seçilen dal: {en_iyi.ad} → {en_iyi.sonuc}",
+        )
